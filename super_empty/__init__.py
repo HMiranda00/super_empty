@@ -7,7 +7,7 @@ from bpy.props import FloatProperty, BoolProperty
 
 bl_info = {
     "name": "Super Empty Rig",
-    "author": "Your Name",
+    "author": "Henrique Miranda",
     "version": (1, 0),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar > Super Empty",
