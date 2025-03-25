@@ -1,18 +1,15 @@
 import os
 import zipfile
-import json
 import shutil
 import sys
 from datetime import datetime
 
 def create_addon_zip():
     """Create a zip file of the addon for easy installation in Blender"""
-    # Load the manifest
-    with open('manifest.json', 'r') as f:
-        manifest = json.load(f)
-    
-    # Create zip filename with version
-    zip_filename = f"{manifest['name'].replace(' ', '_')}_{manifest['version']}.zip"
+    # Define the addon name and create zip filename with timestamp
+    addon_name = "super_empty"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    zip_filename = f"{addon_name}_{timestamp}.zip"
     
     # Define the addon directory (this will be the root in the zip)
     addon_dir = "super_empty"
