@@ -7,7 +7,7 @@ from bpy.props import FloatProperty, BoolProperty
 
 bl_info = {
     "name": "Super Empty Rig",
-    "author": "Your Name",
+    "author": "Henrique Miranda",
     "version": (1, 0),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar > Super Empty",
@@ -228,7 +228,7 @@ def get_selection_bounds(context):
     
     # Get cursor position - this is our center
     center = context.scene.cursor.location.copy()
-    log_debug(f"Center from cursor: {center}")
+    log_debug(f"Center from cursor (pre AABB): {center}")
     
     # MODIFIED: Calculate dimensions considering object rotation
     dimensions = Vector((0, 0, 0))
@@ -241,25 +241,37 @@ def get_selection_bounds(context):
     # Calculate actual dimensions and collect face normals for orientation
     face_normals = []
     
+    depsgraph = context.evaluated_depsgraph_get()
+    
     for obj in context.selected_objects:
         if obj.type == 'MESH':
             log_debug(f"Processing mesh object: {obj.name}")
             
-            # Get dimensions considering rotation
+            # Use evaluated mesh (visual) for AABB and ignore empty geometry
+            eval_obj = obj.evaluated_get(depsgraph)
+            eval_mesh = eval_obj.to_mesh()
+            if not eval_mesh or len(eval_mesh.vertices) == 0:
+                log_debug(f"Skipping {obj.name}: no evaluated geometry")
+                if eval_mesh:
+                    eval_obj.to_mesh_clear()
+                continue
+            
+            # Compute AABB from evaluated vertices
+            for v in eval_mesh.vertices:
+                world_co = eval_obj.matrix_world @ v.co
+                min_point.x = min(min_point.x, world_co.x)
+                min_point.y = min(min_point.y, world_co.y)
+                min_point.z = min(min_point.z, world_co.z)
+                max_point.x = max(max_point.x, world_co.x)
+                max_point.y = max(max_point.y, world_co.y)
+                max_point.z = max(max_point.z, world_co.z)
+            
+            # Still collect a coarse per-object oriented dimension (not used for AABB)
             obj_dim, obj_center, obj_bottom = get_object_oriented_dimensions(obj)
             all_dimensions.append(obj_dim)
             
-            # Update min/max points
-            for corner in obj.bound_box:
-                world_corner = obj.matrix_world @ Vector(corner)
-                
-                min_point.x = min(min_point.x, world_corner.x)
-                min_point.y = min(min_point.y, world_corner.y)
-                min_point.z = min(min_point.z, world_corner.z)
-                
-                max_point.x = max(max_point.x, world_corner.x)
-                max_point.y = max(max_point.y, world_corner.y)
-                max_point.z = max(max_point.z, world_corner.z)
+            # Free evaluated mesh
+            eval_obj.to_mesh_clear()
             
             # Collect face normals (for orientation calculation)
             if obj.data.polygons:
@@ -272,75 +284,17 @@ def get_selection_bounds(context):
                     face_normals.append(world_normal)
                     log_debug(f"Polygon {poly.index} - Local normal: {local_normal}, World normal: {world_normal}")
     
-    # Use bbox dimensions as fallback
+    # Use visual AABB for dimensions and center
     bbox_dimensions = max_point - min_point
+    center = (min_point + max_point) * 0.5
+    log_debug(f"AABB Min: {min_point}, Max: {max_point}, Center: {center}, Dimensions: {bbox_dimensions}")
     
-    # For multiple objects, use the largest dimension on each axis
-    if len(all_dimensions) > 1:
-        dimensions.x = max(dim.x for dim in all_dimensions)
-        dimensions.y = max(dim.y for dim in all_dimensions)
-        dimensions.z = max(dim.z for dim in all_dimensions)
-    elif len(all_dimensions) == 1:
-        dimensions = all_dimensions[0]
-    else:
-        dimensions = bbox_dimensions
+    # Always use visual AABB dimensions to match viewport bounding box
+    dimensions = bbox_dimensions
     
-    # MODIFIED: Completely new calculation of the lowest point for multiple objects
-    # We use the same projection logic as in the get_object_oriented_dimensions function
-    if original_active and original_active.type == 'MESH':
-        # Extract the active object's rotation to determine the "down" vector
-        loc, rot, scale = original_active.matrix_world.decompose()
-        rot_matrix = rot.to_matrix().to_4x4()
-        
-        # FIXED: Use the same corrected logic from get_object_oriented_dimensions
-        world_down = rot_matrix @ Vector((0, 0, 1, 0))
-        world_down = Vector((world_down.x, world_down.y, world_down.z)).normalized()
-        world_down = -world_down  # Invert to point downward
-        
-        log_debug(f"Selection world down vector based on active object (corrected): {world_down}")
-        
-        # Find the lowest point in the world_down direction
-        lowest_point = None
-        lowest_value = float('-inf')  # Start with -inf to find maximum
-        all_corners = []
-        
-        # Collect all corners from all objects
-        for obj in context.selected_objects:
-            if obj.type == 'MESH':
-                obj_corners = [obj.matrix_world @ Vector(corner) for corner in obj.bound_box]
-                all_corners.extend(obj_corners)
-                
-                # Find the lowest point
-                for corner in obj_corners:
-                    proj_value = corner.dot(world_down)
-                    if proj_value > lowest_value:  # FIXED: Look for the MAXIMUM value
-                        lowest_value = proj_value
-                        lowest_point = corner
-        
-        if lowest_point and all_corners:
-            # Find all points that are on the bottom face
-            tolerance = 0.001
-            bottom_face_points = [p for p in all_corners if abs(p.dot(world_down) - lowest_value) < tolerance]
-            
-            if bottom_face_points:
-                # Calculate the center of the bottom face
-                bottom_x = sum(p.x for p in bottom_face_points) / len(bottom_face_points)
-                bottom_y = sum(p.y for p in bottom_face_points) / len(bottom_face_points)
-                bottom_z = sum(p.z for p in bottom_face_points) / len(bottom_face_points)
-                bottom = Vector((bottom_x, bottom_y, bottom_z))
-                log_debug(f"Using average of {len(bottom_face_points)} bottom face points: {bottom}")
-            else:
-                # If we don't find enough points on the bottom face, use the lowest point
-                bottom = lowest_point
-                log_debug(f"Using lowest point: {bottom}")
-        else:
-            # Fallback to center with minimum Z
-            bottom = Vector((center.x, center.y, min_point.z))
-            log_debug(f"Using center-XY with min_z for bottom: {bottom}")
-    else:
-        # If we don't have an active object, use center with minimum Z
-        bottom = Vector((center.x, center.y, min_point.z))
-        log_debug(f"No active object - Using center-XY with min_z for bottom: {bottom}")
+    # Visual AABB bottom: center XY with min Z
+    bottom = Vector((center.x, center.y, min_point.z))
+    log_debug(f"Using visual AABB bottom: {bottom}")
     
     log_debug(f"Calculated bounds - Min: {min_point}, Max: {max_point}")
     log_debug(f"Final Dimensions: {dimensions}")
@@ -960,14 +914,34 @@ class SUPEREMPTY_OT_load_rig(Operator):
             log_debug(f"Root bone orientation set to: {root_bone.rotation_quaternion}")
         
         # Step 3: Reset transformations only for specific bones
-        log_debug("STEP 3 - Resetting specific bone transformations")
-        for bone_name in ['sub_root', 'squash_top']:
+        log_debug("STEP 3 - Resetting and positioning bones")
+        
+        # Calculate the center position for sub_root relative to the object
+        # The key is to position the sub_root at half the height of the object
+        # This ensures it's always at the center, regardless of object size
+        object_center_y = dimensions.z / 2.0  # Half of the object height
+        
+        # Position relative to RIG_BASE_HEIGHT (usar offset para centralizar no rig base)
+        relative_center_y = object_center_y - (RIG_BASE_HEIGHT / 2.0)
+        
+        log_debug(f"Calculated sub_root position - Object height: {dimensions.z}, Center Y: {object_center_y}, Relative Y: {relative_center_y}")
+        
+        # Reset and position bones
+        for bone_name in ['squash_top', 'main']:
             bone = armature.pose.bones.get(bone_name)
             if bone:
                 bone.location = Vector((0, 0, 0))
                 bone.rotation_mode = 'XYZ'
                 bone.rotation_euler = Vector((0, 0, 0))
                 bone.scale = Vector((1, 1, 1))
+        
+        # Position sub_root especificamente no centro da altura do objeto
+        if sub_root_bone:
+            sub_root_bone.location = Vector((0, relative_center_y, 0))
+            sub_root_bone.rotation_mode = 'XYZ'
+            sub_root_bone.rotation_euler = Vector((0, 0, 0))
+            sub_root_bone.scale = Vector((1, 1, 1))
+            log_debug(f"Positioned sub_root at center: {sub_root_bone.location}")
         
         # Step 4: Apply orientation to the sub_root bone only if not using direct copy
         if not self.use_root_positioning and not self.use_direct_copy:
@@ -987,9 +961,11 @@ class SUPEREMPTY_OT_load_rig(Operator):
         # SIMPLIFIED: Use dimensions already calculated for multiple objects
         height = dimensions.z * self.height_factor
         
-        # Ensure a minimum size
-        if height < 0.001:
-            height = 1.0
+        # Ensure a minimum size for very small objects
+        min_height = 0.001  # Even smaller minimum to support very tiny objects
+        if height < min_height:
+            log_debug(f"Object height {height} is below minimum, using {min_height}")
+            height = min_height
         
         log_debug(f"Using height for squash_top: {height}")
         
@@ -997,11 +973,30 @@ class SUPEREMPTY_OT_load_rig(Operator):
         # Regardless of whether the object is taller or shorter than the rig's base height
         height_adjustment = height - RIG_BASE_HEIGHT
         
+        # Compensate sub_root Y offset so the world top stays correct
+        squash_top_offset = height_adjustment - relative_center_y
+        
         # We adjust the squash_top location to reflect the difference between the object height
         # and the rig's base height - allowing it to be negative for smaller objects
         log_debug(f"STEP 5 - Object height: {height}, Rig base height: {RIG_BASE_HEIGHT}")
-        log_debug(f"Setting squash_top height on Y axis: {height_adjustment}")
-        squash_top_bone.location = Vector((0, height_adjustment, 0))
+        log_debug(f"Setting squash_top height on Y axis: {height_adjustment} (compensated by sub_root: {relative_center_y}) => final: {squash_top_offset}")
+        squash_top_bone.location = Vector((0, squash_top_offset, 0))
+        
+        # Also compensate a potential squash base bone so it stays aligned with the world bottom
+        # Try common naming variants to remain compatible with different templates
+        squash_base_bone = None
+        for candidate_name in ['squash_base', 'squash_bottom', 'squash_bot', 'squash_base_ctrl', 'squash_lower']:
+            b = armature.pose.bones.get(candidate_name)
+            if b:
+                squash_base_bone = b
+                break
+        
+        if squash_base_bone:
+            base_offset_y = -relative_center_y
+            log_debug(f"Found {squash_base_bone.name}. Setting base Y offset to {base_offset_y} (compensating sub_root {relative_center_y})")
+            squash_base_bone.location = Vector((0, base_offset_y, 0))
+        else:
+            log_debug("No squash base bone found (looked for: squash_base, squash_bottom, squash_bot, squash_base_ctrl, squash_lower)")
         
         # Step 6: Scale the bone shapes to match the object dimensions - NOW NON-UNIFORM
         if self.adjust_shapes:
@@ -1009,24 +1004,36 @@ class SUPEREMPTY_OT_load_rig(Operator):
             
             # SIMPLIFIED: Use calculated dimensions directly
             # Dimensions have already been correctly calculated for multiple objects
-            x_scale = max(dimensions.x / 2.0, 0.1)  # X axis
-            z_scale = max(dimensions.y / 2.0, 0.1)  # Y axis in obj space = Z in bone space
-            y_scale = max(dimensions.z / 2.0, 0.1)  # Z axis in obj space = Y in bone space
+            # Ensure minimum scale values for very small objects
+            min_scale = 0.005  # Much smaller minimum scale for very tiny objects
+            x_scale = max(dimensions.x / 2.0, min_scale)  # X axis
+            z_scale = max(dimensions.y / 2.0, min_scale)  # Y axis in obj space = Z in bone space
+            y_scale = max(dimensions.z / 2.0, min_scale)  # Z axis in obj space = Y in bone space
             
             log_debug(f"Non-uniform shape scale: X={x_scale}, Y={y_scale}, Z={z_scale}")
             
             # Apply non-uniform scale on the main bone to cover the entire selection
-            main_bone.custom_shape_scale_xyz = Vector((x_scale, y_scale, z_scale))
+            # Keep main ring circular in X/Z by using the larger horizontal dimension
+            horizontal_radius = max(dimensions.x, dimensions.y) / 2.0
+            main_bone.custom_shape_scale_xyz = Vector((max(horizontal_radius, min_scale), y_scale, max(horizontal_radius, min_scale)))
+            
+            # For sub_root, scale the cube to match the actual bounding box dimensions
+            # This makes the cube shape represent the object's real bounds
+            cube_scale_x = max(dimensions.x / 2.0, min_scale)
+            cube_scale_y = max(dimensions.y / 2.0, min_scale) 
+            cube_scale_z = max(dimensions.z / 2.0, min_scale)
+            sub_root_bone.custom_shape_scale_xyz = Vector((cube_scale_x, cube_scale_z, cube_scale_y))  # Note: Y/Z swap for bone space
+            log_debug(f"Sub_root cube scaled to match bounding box: X={cube_scale_x}, Y={cube_scale_z}, Z={cube_scale_y}")
             
             # For other bones, use a uniform scale based on the largest dimension
             max_dim = max(dimensions.x, dimensions.y, dimensions.z)
             log_debug(f"Max single dimension for uniform scaling: {max_dim}")
                 
-            uniform_scale = max(max_dim / 2.0, 0.1)
+            uniform_scale = max(max_dim / 2.0, min_scale)
             
             # Apply uniform scale to other bones
             for bone in armature.pose.bones:
-                if bone.custom_shape and bone != main_bone:
+                if bone.custom_shape and bone != main_bone and bone != sub_root_bone:
                     bone.custom_shape_scale_xyz = Vector((uniform_scale, uniform_scale, uniform_scale))
         
         # Exit pose mode
